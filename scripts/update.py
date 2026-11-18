@@ -191,11 +191,17 @@ def main():
         if args.fixture:
             return
         now = datetime.now(timezone.utc)
-        data = dict(schema=1, source=SOURCE, fetchedAt=now.isoformat(timespec="seconds"), sourceAt=stamp.isoformat(timespec="seconds"), rows=rows)
         if args.output.exists():
             previous = json.loads(args.output.read_text())
-            if stamp < datetime.fromisoformat(previous["sourceAt"]):
-                raise ValueError("upstream snapshot is older than the last published one")
+            previous_stamp = datetime.fromisoformat(previous["sourceAt"])
+            if stamp < previous_stamp:
+                print(f"Upstream source time {stamp.isoformat()}; previous {previous_stamp.isoformat()}")
+                if rows != previous["rows"]:
+                    raise ValueError("upstream returned an older ranking with different rows")
+                # Replicas can report a different age for the same table.
+                # Confirm the read without changing the time shown for the ranking.
+                stamp = previous_stamp
+        data = dict(schema=1, source=SOURCE, fetchedAt=now.isoformat(timespec="seconds"), sourceAt=stamp.isoformat(timespec="seconds"), rows=rows)
         tmp = args.output.with_suffix(".tmp")
         tmp.write_text(json.dumps(data, ensure_ascii=False, separators=(",", ":")) + "\n")
         tmp.replace(args.output)
