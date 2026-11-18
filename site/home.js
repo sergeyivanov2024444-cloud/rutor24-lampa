@@ -1,4 +1,4 @@
-/* Персональная главная Lampa v1.2.0 cloud */
+/* Персональная главная Lampa v1.3.0 cloud */
 (function () {
     'use strict';
     var KEY = 'rt24_home';
@@ -252,7 +252,7 @@
                         return;
                     }
                     if (isRutor && !data.rt24Entry) return;
-                    card.use({
+                    if (!isRutor) card.use({
                         onCreate: function () {
                             var image = this.render(true).querySelector('.card__img');
                             if (!image) return;
@@ -275,11 +275,13 @@
                         }});
                         return;
                     }
+                    var api = window.Rutor24Home;
+                    if (api && api.bindCard) api.bindCard(card, data.rt24Entry);
                     card.use({
                         onlyEnter: function () {
                             var api = window.Rutor24Home;
                             var current = L.Activity.active();
-                            if (api && current && current.component === 'main') api.openRelease(data.rt24Entry);
+                            if (api && current && current.component === 'main') (api.openEntry || api.openRelease)(data.rt24Entry);
                         },
                         onCreate: function () {
                             var view = this.render(true).querySelector('.card__view');

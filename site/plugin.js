@@ -1,4 +1,4 @@
-/* Rutor · Топ 24 часа v0.6.0 cloud | Lampa */
+/* Rutor · Топ 24 часа v0.7.0 cloud | Lampa */
 (function () {
     'use strict';
 
@@ -13,6 +13,15 @@
     var failed = false;
     var cache, pending;
     var matches = new Map();
+    // Covers verified against the title and artwork on the corresponding release page.
+    var releaseCovers = {
+        '1114973': 'https://lostpix.com/img/2026-11/17/l18koxbtctjpn3k8vmpzabu26.jpg',
+        '1114966': 'https://lostpix.com/img/2026-11/17/6z8bta06khagkxgmg05yt5p2q.jpg'
+    };
+    var releaseImdb = {
+        '1114919': 'tt34549572', '1114538': 'tt23112594', '1114943': 'tt35889803',
+        '1114959': 'tt42206645', '1114960': 'tt29256561'
+    };
     var torrentOpening = false, torrentLaunchAt = 0;
     var categories = {
         '/kino': 'movie', '/nashe_kino': 'movie', '/nauchno_popularnoe': 'video',
@@ -174,6 +183,7 @@
         var expected = row.names.map(normalize);
         var candidates = list.map(function (card) {
             if (!card || !card.id || (card.media_type !== 'tv' && card.media_type !== 'movie')) return null;
+            if (row.series && card.media_type !== 'tv') return null;
             if ((row.kind === 'tv' || row.kind === 'movie') && card.media_type !== row.kind) return null;
             var hit = [card.title || card.name, card.original_title || card.original_name].map(normalize)
                 .filter(function (name) { return name && expected.indexOf(name) >= 0; });
@@ -188,12 +198,14 @@
             if (card.media_type === row.kind) score += 3;
             return {score: score, card: card};
         }).filter(Boolean).sort(function (a, b) { return b.score - a.score; });
-        if (!candidates.length || (candidates[1] && candidates[0].score === candidates[1].score)) return null;
+        if (!candidates.length || (candidates[1] && candidates[0].score - candidates[1].score < 5)) return null;
         return Object.assign({}, candidates[0].card, {source: 'tmdb'});
     }
 
     function lookup(L, row) {
-        var key = [row.kind, row.year, row.names.map(normalize).join('|')].join(':');
+        if (/(?:сборник|коллекция фильмов|трилогия|дилогия|антология фильмов)/i.test(row.names[0] || '')) return Promise.resolve(null);
+        var imdb = releaseImdb[row.id];
+        var key = [imdb || '', row.kind, row.series, row.year, row.endYear, row.names.map(normalize).join('|')].join(':');
         var saved = matches.get(key);
         if (saved && Date.now() < saved.until) return saved.promise;
         var api = L.Api && L.Api.sources && L.Api.sources.tmdb;
@@ -201,13 +213,33 @@
         var queries = Array.from(new Set(row.names.map(clean).filter(Boolean))).slice(0, 4);
         var serviceFailed = false;
         var found = new Map();
+        function request(method, params) {
+            return timed(function (ok, no) { api.get(method, params, ok, no); }, 11500);
+        }
+        function byExternalId() {
+            if (!imdb) return Promise.resolve(null);
+            return request('find/' + imdb, {langs: 'ru-RU', filter: {external_source: 'imdb_id'}}).then(function (data) {
+                var list = ['movie', 'tv'].flatMap(function (type) {
+                    return (data[type + '_results'] || []).map(function (card) {
+                        return Object.assign({}, card, {media_type: type});
+                    });
+                });
+                // Also require the returned work to match the release title and date.
+                return pickMatch(list, row);
+            }).catch(function () { serviceFailed = true; return null; });
+        }
         function next(index) {
             if (!queries[index]) return Promise.resolve(pickMatch(Array.from(found.values()), row));
-            return timed(function (ok, no) {
-                api.get('search/multi', {query: queries[index], langs: 'ru-RU'}, ok, no);
-            }, 11500).then(function (result) {
+            return request(row.series || row.kind === 'tv' ? 'search/tv' : row.kind === 'movie' ? 'search/movie' : 'search/multi',
+                {query: encodeURIComponent(queries[index]), langs: 'ru-RU'}).then(function (result) {
                 var list = result && Array.isArray(result.results) ? result.results : [];
-                list.forEach(function (card) { found.set(card.media_type + ':' + card.id, card); });
+                list.forEach(function (card) {
+                    var type = card.media_type || (card.first_air_date || card.name ? 'tv' : 'movie');
+                    var id = type + ':' + card.id;
+                    if (type !== 'person' && (!found.has(id) || !found.get(id).poster_path)) {
+                        found.set(id, Object.assign({}, card, {media_type: type}));
+                    }
+                });
                 return next(index + 1);
             }, function () {
                 serviceFailed = true;
@@ -216,7 +248,7 @@
         }
         if (matches.size >= 96) matches.delete(matches.keys().next().value);
         var item = {until: Date.now() + 50000};
-        item.promise = next(0).then(function (card) {
+        item.promise = byExternalId().then(function (card) { return card || next(0); }).then(function (card) {
             item.until = Date.now() + (card ? 3600000 : serviceFailed ? 30000 : 300000);
             return card && {
                 id: card.id, source: 'tmdb', media_type: card.media_type, title: card.title, name: card.name,
@@ -226,6 +258,27 @@
         });
         matches.set(key, item);
         return item.promise;
+    }
+
+    function backupPoster(L, entry) {
+        if (entry.backup) return entry.backup;
+        var cover = entry.cover || '';
+        var card = entry.card;
+        var api = L.Api.sources.tmdb;
+        if (!card || !api || !api.get) return Promise.resolve(cover);
+        entry.backup = timed(function (ok, fail) {
+            api.get(card.media_type + '/' + card.id + '/images',
+                {filter: {include_image_language: 'ru,en,null'}}, ok, fail);
+        }, 4500).then(function (data) {
+            var posters = (data.posters || []).filter(function (poster) {
+                return poster.file_path !== card.poster_path && /^\/[\w.-]+$/.test(poster.file_path);
+            });
+            var best = ['ru', null, 'en'].map(function (lang) {
+                return posters.find(function (poster) { return poster.iso_639_1 === lang; });
+            }).find(Boolean);
+            return best && typeof api.img === 'function' ? api.img(best.file_path) : cover;
+        }).catch(function () { return cover; });
+        return entry.backup;
     }
 
     function visible(row, filter, card) {
@@ -269,9 +322,109 @@
             '@media(max-width:700px){.rt24-release-screen{padding:1em}.rt24-release-meta{grid-template-columns:1fr}}';
         document.head.appendChild(css);
 
+        var fullReleases = new WeakMap();
+        var homeUpdates = new WeakMap();
+        var canAttachFull = L.Listener && typeof L.Listener.follow === 'function' && L.Activity && L.Activity.push;
+
+        if (canAttachFull) {
+            L.Listener.follow('full', function (event) {
+                if (event.type !== 'complite' || !event.body || !fullReleases.has(event.object) ||
+                    (window.lampa_settings && window.lampa_settings.read_only)) return;
+                var entry = fullReleases.get(event.object);
+                var buttons = event.body.find('.full-start-new__buttons, .full-start__buttons').first();
+                if (!buttons.length || buttons.find('.rt24-open-release').length) return;
+                var button = $(node('div', 'full-start__button selector rt24-open-release'));
+                button.append('<svg><use xlink:href="#sprite-torrent"></use></svg>');
+                button.append(node('span', '', 'Раздача Rutor'));
+                button.on('hover:focus', function () {
+                    // Full's normal focus bindings were created before the plugin button.
+                    var start = event.link && event.link.items && event.link.items[0];
+                    if (start) start.last = this;
+                });
+                button.on('hover:enter', function () {
+                    if (L.Activity.active() === event.object) {
+                        openReleaseScreen(entry.row, entry.card, entry.posterUrl || entry.poster || entry.cover, true);
+                    }
+                });
+                buttons.append(button);
+            });
+            if (L.Activity.listener) L.Activity.listener.follow('backward', function () {
+                var current = L.Activity.active();
+                if (fullReleases.has(current) && current.activity) current.activity.is_started = false;
+            });
+        }
+
+        function openEntry(entry) {
+            var card = entry.card;
+            if (!card || !card.id || !canAttachFull) {
+                openReleaseScreen(entry.row, card, entry.posterUrl || entry.poster || entry.cover);
+                return;
+            }
+            var page = {component: 'full', url: '', page: 1, source: 'tmdb',
+                id: card.id, method: card.media_type, card: Object.assign({}, card)};
+            fullReleases.set(page, entry);
+            L.Activity.push(page);
+        }
+
+        function decorateNative(card) {
+            var el = card.render(true);
+            var view = el.querySelector('.card__view');
+            var modules = L.Maker && L.Maker.map('Card');
+            if (!modules || !view) return;
+            el.querySelector('.card__title').textContent = card.data.title || card.data.name || '';
+            if (!el.querySelector('.card__age')) el.appendChild(node('div', 'card__age'));
+            modules.Release.onCreate.call(card);
+            if (!view.querySelector('.card__type')) modules.Icons.onCreate.call(card);
+            if (!view.querySelector('.card__vote')) modules.Ratting.onCreate.call(card);
+            card.update();
+        }
+
+        function bindHomeCard(card, entry) {
+            var shown = false;
+            function refresh() {
+                decorateNative(card);
+                if (shown && card.img) card.img.src = card.getPosterPath();
+            }
+            card.use({
+                onVisible: function () { shown = true; },
+                onDestroy: function () { homeUpdates.delete(entry); },
+                onCreate: function () {
+                    var image = this.img;
+                    if (!image) return;
+                    image.onerror = function () {
+                        image.onerror = null;
+                        clearTimeout(card.img_timer);
+                        var failed = image.getAttribute('src');
+                        function use(url) {
+                            if (image.getAttribute('src') !== failed || !image.isConnected) return;
+                            image.onerror = function () {
+                                image.onerror = null;
+                                if (entry.cover && image.getAttribute('src') !== entry.cover) {
+                                    image.onerror = function () {
+                                        image.onerror = null;
+                                        image.src = './img/img_broken.svg';
+                                    };
+                                    image.src = entry.cover;
+                                } else image.src = './img/img_broken.svg';
+                            };
+                            image.src = url || entry.cover || './img/img_broken.svg';
+                        }
+                        if (/img_broken\.svg$/.test(failed || '')) return;
+                        if (failed === entry.cover) {
+                            image.src = './img/img_broken.svg';
+                            return;
+                        }
+                        backupPoster(L, entry).then(use);
+                    };
+                }
+            });
+            homeUpdates.set(entry, refresh);
+        }
+
         function startTorrent(row, card, poster) {
             var current = L.Activity.active();
             if (!current || current.component !== RELEASE_NAME || torrentOpening || Date.now() - torrentLaunchAt < 500) return;
+            if (window.lampa_settings && window.lampa_settings.read_only) return;
             if (!row.magnet && !row.torrent) return L.Noty.show('У этой раздачи нет ссылки на торрент в таблице Rutor.');
             if (!L.Torrent || typeof L.Torrent.start !== 'function') return L.Noty.show('В этой сборке Lampa недоступен штатный запуск торрентов.');
             torrentOpening = true;
@@ -353,7 +506,7 @@
             }
 
             actions.appendChild(watch);
-            actions.appendChild(open);
+            if (!activity.fromFull && movie) actions.appendChild(open);
             root.appendChild(title);
             root.appendChild(subtitle);
             root.appendChild(rowItem);
@@ -470,6 +623,7 @@
 
             function startPoster(entry) {
                 var loader = new Image();
+                var url = entry.posterUrl;
                 var timeout;
                 inFlight.add(entry);
                 function finish(success) {
@@ -477,19 +631,32 @@
                     clearTimeout(timeout);
                     loader.onload = loader.onerror = null;
                     entry.cancelPoster = null;
-                    if (success) {
+                    if (url !== entry.posterUrl) {
+                        loader.removeAttribute('src');
+                    } else if (success) {
                         loader.className = entry.image.className;
                         loader.alt = '';
                         entry.image.replaceWith(loader);
                         entry.image = loader;
-                    } else loader.removeAttribute('src');
+                    } else {
+                        loader.removeAttribute('src');
+                        if (!entry.triedBackup && entry.element.isConnected && !entry.discardPoster) {
+                            entry.triedBackup = true;
+                            backupPoster(L, entry).then(function (url) {
+                                var next = url && url !== entry.posterUrl ? url : entry.cover;
+                                if (next && next !== entry.posterUrl && !dead && grid.contains(entry.element)) {
+                                    enqueuePoster(entry, next);
+                                }
+                            });
+                        }
+                    }
                     schedulePosters();
                 }
                 entry.cancelPoster = function () { finish(false); };
                 timeout = setTimeout(entry.cancelPoster, 8500);
                 loader.onload = function () { finish(true); };
                 loader.onerror = entry.cancelPoster;
-                loader.src = entry.posterUrl;
+                loader.src = url;
             }
 
             function focus(target, keepScroll) {
@@ -609,41 +776,54 @@
                 });
             }
 
+            function enqueuePoster(entry, url) {
+                entry.posterUrl = url;
+                if (entry.cancelPoster) entry.cancelPoster();
+                posterJobs.set(entry.element, entry);
+                if (observer) observer.observe(entry.element);
+                schedulePosters();
+            }
+
             function makeCard(row) {
-                var title = (row.names[0] || 'Видео').slice(0, 110);
-                // Use the native template and focus CSS without its second image lifecycle.
-                var element = L.Template.js('card');
+                var cover = releaseCovers[row.id] || '';
+                var data = {title: row.names[0] || 'Видео', release_date: row.year ? String(row.year) : '',
+                    original_name: row.series || row.kind === 'tv' ? row.names[0] : undefined};
+                // The catalog retains its bounded image queue and grid navigation.
+                var nativeCard = L.Maker && L.Maker.make('Card', data, function (mask) {
+                    return mask.only('Card', 'Icons', 'Ratting', 'Release', 'Style');
+                });
+                if (nativeCard) nativeCard.create();
+                var element = nativeCard ? nativeCard.render(true) : L.Template.js('card');
                 element.classList.remove('layer--visible');
                 var image = element.querySelector('.card__img');
                 var view = element.querySelector('.card__view');
                 element.classList.add('rt24-card', 'card--loaded');
-                var age = element.querySelector('.card__age');
                 element.setAttribute('data-release', row.id);
                 image.alt = '';
                 image.src = placeholder;
-                element.querySelector('.card__title').textContent = title;
-                if (age) age.textContent = row.year || '';
+                element.querySelector('.card__title').textContent = data.title;
                 view.appendChild(node('span', 'rt24-rank', '№ ' + row.rank));
-                var entry = {row: row, element: element, image: image, checking: true};
+                var entry = {row: row, element: element, image: image, checking: true, cover: cover, nativeCard: nativeCard};
                 entry.decorate = function (card) {
-                    if (L.Api && L.Api.sources && L.Api.sources.tmdb && L.Api.sources.tmdb.img &&
-                        card.poster_path && /^\/[\w.-]+$/.test(card.poster_path)) {
-                        entry.posterUrl = L.Api.sources.tmdb.img(card.poster_path);
-                        posterJobs.set(element, entry);
-                        if (observer) observer.observe(element);
-                        schedulePosters();
+                    if (card.poster_path && /^\/[\w.-]+$/.test(card.poster_path)) {
+                        enqueuePoster(entry, L.Api.sources.tmdb.img(card.poster_path));
+                    } else if (!cover) {
+                        backupPoster(L, entry).then(function (url) {
+                            if (url && !dead && grid.contains(element)) enqueuePoster(entry, url);
+                        });
                     }
-                    var vote = Number(card.vote_average);
-                    if (vote > 0 && vote <= 10) view.appendChild(node('span', 'card__vote', vote.toFixed(1)));
-                    element.querySelector('.card__title').textContent = card.title || card.name || title;
-                    var year = String(card.release_date || card.first_air_date || row.year || '').slice(0, 4);
-                    if (year && !age) {
-                        age = node('div', 'card__age');
-                        element.appendChild(age);
+                    if (nativeCard) {
+                        Object.assign(data, card, {title: card.title || card.name,
+                            release_date: card.release_date || card.first_air_date});
+                        decorateNative(nativeCard);
                     }
-                    if (age) age.textContent = year;
                 };
-                bind(element, function () { openRelease(entry); });
+                if (cover) enqueuePoster(entry, cover);
+                bind(element, function () {
+                    if (!canOpen()) return;
+                    selection = element;
+                    openEntry(entry);
+                });
                 element.addEventListener('hover:long', function () { actions(entry); });
                 return entry;
             }
@@ -654,7 +834,8 @@
                 near.clear();
                 if (frame) cancelAnimationFrame(frame);
                 frame = 0;
-                inFlight.forEach(function (entry) { entry.cancelPoster(); });
+                inFlight.forEach(function (entry) { entry.discardPoster = true; entry.cancelPoster(); });
+                cards.forEach(function (entry) { if (entry.nativeCard) entry.nativeCard.destroy(); });
                 cards = [];
                 grid.textContent = '';
             }
@@ -781,14 +962,13 @@
             };
         }
 
-        function openReleaseScreen(row, movie, poster) {
+        function openReleaseScreen(row, movie, poster, fromFull) {
             var current = L.Activity.active();
             if (current && current.component === RELEASE_NAME) return;
             L.Activity.push({component: RELEASE_NAME, title: 'Раздача № ' + row.rank,
-                row: row, movie: movie, poster: poster || ''});
+                row: row, movie: movie, poster: poster || '', fromFull: !!fromFull});
         }
 
-        var homeMatches = new Map();
         var homeRankStatus = {};
         function homeCards(limit, maxAge) {
             return getTop(L, false, maxAge).then(function (data) {
@@ -797,25 +977,30 @@
                     return visible(row, 'all') && !row.nonvideo;
                 }).slice(0, limit);
                 var results = rows.map(function (row) {
+                    var cover = releaseCovers[row.id] || '';
                     return {title: row.names[0] || row.title, release_date: row.year ? String(row.year) : '',
-                        source: 'tmdb', rt24Entry: {row: row}};
+                        source: 'tmdb', poster: cover, rt24Entry: {row: row, cover: cover}};
                 });
                 var index = 0;
                 var expired = false;
                 function worker() {
-                    if (expired || index >= rows.length) return Promise.resolve();
-                    var i = index++;
-                    var row = rows[i];
-                    var saved = homeMatches.get(row.id);
-                    var match = saved && saved.title === row.title && saved.until > Date.now()
-                        ? Promise.resolve(saved.card) : lookup(L, row);
-                    return match.then(function (card) {
-                        if (homeMatches.size >= 96) homeMatches.delete(homeMatches.keys().next().value);
-                        homeMatches.set(row.id, {title: row.title, card: card, until: Date.now() + (card ? 3600000 : 60000)});
-                        if (!expired && card) {
-                            var poster = card.poster_path ? L.Api.sources.tmdb.img(card.poster_path) : '';
-                            Object.assign(results[i], card, {rt24Entry: {row: row, card: card, poster: poster}});
-                        }
+                    if (index >= rows.length) return Promise.resolve();
+                    var result = results[index++];
+                    var entry = result.rt24Entry;
+                    return lookup(L, entry.row).then(function (card) {
+                        if (!card) return;
+                        entry.card = card;
+                        entry.poster = card.poster_path ? L.Api.sources.tmdb.img(card.poster_path) : entry.cover;
+                        Object.assign(result, card, {title: card.title || card.name,
+                            release_date: card.release_date || card.first_air_date});
+                        var refresh = homeUpdates.get(entry);
+                        if (refresh) refresh();
+                        if (!card.poster_path && !entry.cover) return backupPoster(L, entry).then(function (url) {
+                            if (!url) return;
+                            entry.poster = result.poster = url;
+                            var update = homeUpdates.get(entry);
+                            if (update) update();
+                        });
                     }).catch(function () {}).then(worker);
                 }
                 return new Promise(function (resolve) {
@@ -833,6 +1018,8 @@
 
         window.Rutor24Home = {
             cards: homeCards,
+            bindCard: bindHomeCard,
+            openEntry: openEntry,
             status: function () { return homeRankStatus; },
             openCatalog: function () {
                 L.Activity.push({component: NAME, title: TITLE, url: '', page: 1});
