@@ -1,4 +1,4 @@
-/* Персональная главная Lampa v1.3.0 cloud */
+/* Персональная главная Lampa v1.3.1 cloud */
 (function () {
     'use strict';
     var KEY = 'rt24_home';
@@ -142,9 +142,11 @@
                     return api.cards(limit(), age()).then(function (cards) {
                         if (!cards.length) return unavailable('rutor');
                         var status = api.status ? api.status() : {};
-                        var when = status.stale ? ' · сохранённый рейтинг ' + new Date(status.at).toLocaleString('ru-RU', {
-                            day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'
-                        }) : '';
+                        var timeFormat = {day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'};
+                        var when = status.checkedAt ? ' · проверено ' + new Date(status.checkedAt).toLocaleString('ru-RU', timeFormat) : '';
+                        if (status.stale && status.at) {
+                            when += ' · снимок ' + new Date(status.at).toLocaleString('ru-RU', timeFormat);
+                        }
                         return result(kind, RUTOR + when, cards);
                     });
                 });

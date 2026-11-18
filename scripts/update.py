@@ -76,8 +76,11 @@ def clean(text):
     return " ".join(text.split())
 
 
-def fetch(url):
-    with urlopen(Request(url, headers={"User-Agent": "Rutor24-Lampa/0.6", "Accept": "text/html"}), timeout=10) as response:
+def fetch(url, revalidate=False):
+    headers = {"User-Agent": "Rutor24-Lampa/0.7", "Accept": "text/html"}
+    if revalidate:
+        headers["Cache-Control"] = "no-cache, max-age=0"
+    with urlopen(Request(url, headers=headers), timeout=10) as response:
         if urlsplit(response.url).hostname not in HOSTS:
             raise ValueError("unexpected redirect")
         if response.headers.get_content_type() != "text/html":
@@ -92,6 +95,23 @@ def fetch(url):
         if response.headers.get("Date"):
             stamp = min(stamp, parsedate_to_datetime(response.headers["Date"]))
         return body.decode("utf-8"), stamp
+
+
+def fetch_ranking():
+    html, stamp = fetch(SOURCE, revalidate=True)
+    rows = parse(html)
+    if datetime.now(timezone.utc) - stamp <= timedelta(minutes=30):
+        return rows, stamp
+
+    # Some caches ignore revalidation. Check the same table with a fresh URL once.
+    try:
+        nonce = int(datetime.now(timezone.utc).timestamp())
+        retry_html, retry_stamp = fetch(f"{SOURCE}?rt24_refresh={nonce}", revalidate=True)
+        if retry_stamp > stamp:
+            return parse(retry_html), retry_stamp
+    except (OSError, ValueError, StopIteration, IndexError, KeyError) as error:
+        print(f"Rutor cache revalidation retry failed: {type(error).__name__}")
+    return rows, stamp
 
 
 def links(cell, rid):
@@ -175,8 +195,7 @@ def main():
     cli.add_argument("--fixture", type=Path, help="Verify the parser without publishing a fixture")
     args = cli.parse_args()
     try:
-        html, stamp = (args.fixture.read_text(), None) if args.fixture else fetch(SOURCE)
-        rows = parse(html)
+        rows, stamp = (parse(args.fixture.read_text()), None) if args.fixture else fetch_ranking()
         if not args.fixture:
             # Resolve a bounded number of ambiguous entries. Unconfirmed entries remain hidden.
             ambiguous = [r for r in rows if r["category"] not in KNOWN_VIDEO | {"/games", "/knigi"} and not VIDEO.search(r["title"]) and not NONVIDEO.search(r["title"])][:4]
@@ -197,7 +216,8 @@ def main():
             if stamp < previous_stamp:
                 print(f"Upstream source time {stamp.isoformat()}; previous {previous_stamp.isoformat()}")
                 if rows != previous["rows"]:
-                    raise ValueError("upstream returned an older ranking with different rows")
+                    print("Rutor returned a different, older ranking. Keeping the published snapshot.")
+                    return
                 # Replicas can report a different age for the same table.
                 # Confirm the read without changing the time shown for the ranking.
                 stamp = previous_stamp

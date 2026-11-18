@@ -1,4 +1,4 @@
-/* Rutor · Топ 24 часа v0.7.0 cloud | Lampa */
+/* Rutor · Топ 24 часа v0.7.1 cloud | Lampa */
 (function () {
     'use strict';
 
@@ -686,7 +686,7 @@
                     var at = new Date(snapshot.at).toLocaleString('ru-RU', format);
                     var checked = new Date(snapshot.fetchedAt).toLocaleString('ru-RU', format);
                     status.textContent = (busy ? 'Обновляем рейтинг… ' : (snapshot.stale || Date.now() - snapshot.at > STALE) ? 'Рейтинг может быть устаревшим · ' : 'Рейтинг Rutor · ') +
-                        at + ' · проверено ' + checked + ' · ' + count + ' видео из ' + snapshot.rows.length + ' раздач' + (count ? '' : ' · В этом фильтре пусто');
+                        'снимок ' + at + ' · проверено ' + checked + ' · ' + count + ' видео из ' + snapshot.rows.length + ' раздач' + (count ? '' : ' · В этом фильтре пусто');
                 }
                 if (takeFocus) focus(buttons[current]);
                 schedulePosters();
@@ -972,7 +972,7 @@
         var homeRankStatus = {};
         function homeCards(limit, maxAge) {
             return getTop(L, false, maxAge).then(function (data) {
-                homeRankStatus = {stale: data.stale, at: data.at};
+                homeRankStatus = {stale: data.stale, at: data.at, checkedAt: data.fetchedAt};
                 var rows = data.rows.filter(function (row) {
                     return visible(row, 'all') && !row.nonvideo;
                 }).slice(0, limit);

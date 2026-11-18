@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const test = require('node:test');
 const home = readFileSync(process.env.RUTOR_HOME_TEST_FILE || 'site/home.js', 'utf8');
 
-function harness({ channels = true, ready = false, outage = false, disabled = false, oldPage = false } = {}) {
+function harness({ channels = true, ready = false, outage = false, disabled = false, oldPage = false, rankStatus = { stale: false } } = {}) {
     const now = { title: 'Сейчас смотрят' };
     const stock = { title: 'Другая штатная подборка' };
     const registry = [];
@@ -70,7 +70,7 @@ function harness({ channels = true, ready = false, outage = false, disabled = fa
             if (outage) throw Error('offline');
             return [{ title: 'Раздача', rt24Entry: { row: { rank: 1, id: '7' } } }];
         },
-        status: () => ({ stale: false })
+        status: () => rankStatus
     }};
     const env = vm.createContext({ window, setTimeout, clearTimeout,
         document: { createElement: () => ({}), head: { appendChild() {} } } });
@@ -132,4 +132,17 @@ test('respects the Channels toggle and leaves a non-main screen alone', async ()
     const other = harness({ channels: false });
     other.install();
     assert.equal(titles(await other.load({ component: 'category' })), 'Сейчас смотрят|Другая штатная подборка');
+});
+
+
+test('shows the cloud check time separately from the age of the ranking', async () => {
+    const date = Date.UTC(2026, 10, 18, 14, 4);
+    const checked = date + 3720000;
+    const format = {day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'};
+    const h = harness({rankStatus: {stale: true, at: date, checkedAt: checked}});
+    h.install();
+    const rows = await h.load();
+    assert.equal(rows[1].title, 'Rutor · Топ 24 часа · проверено ' +
+        new Date(checked).toLocaleString('ru-RU', format) + ' · снимок ' +
+        new Date(date).toLocaleString('ru-RU', format));
 });
